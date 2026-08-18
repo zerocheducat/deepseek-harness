@@ -8,7 +8,7 @@ import { mkdir, stat } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
-import type { Agent, ModelSelection, ModelSelectionRef, AgentOptions, AgentStatus } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle, ModelSelection, ModelSelectionRef, AgentOptions, AgentStatus } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-presets/types'
 import { AttachmentError } from '@deepseek-ai/dsh-attachment'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
@@ -1094,6 +1094,10 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
   const presetSwitches = new Map<SessionId, Promise<unknown>>()
   /** Client-chosen identity creation/resume, deduplicated across concurrent retries. */
   const sessionCreations = new Map<SessionId, Promise<Agent>>()
+  /** Teardown capabilities for top-level Agents created/resumed by this Host. */
+  const managedSessionHandles = new Map<SessionId, AgentHandle>()
+  /** Host event streams currently connected to this ApiProxy. */
+  const hostQueues = new Set<FrameQueue<RpcRequest<HostFrame>>>()
   /** Serializes path ownership and explicit title checks with Workspace mutations. */
   let workspaceCreationChain = Promise.resolve()
   const pendingQuestions = new Map<RpcId, PendingQuestion>()
@@ -1623,11 +1627,13 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           // session's history was produced under that composition, and
           // rebuilding it differently would replay tool calls the model can no
           // longer make.
-          return (await ctx.agents.resume({
+          const handle = await ctx.agents.resume({
             resumeSessionId: sessionId,
             agentOptions: agentOptions(),
             setup: (await composeAgent(storedPreset)).setup,
-          })).agent
+          })
+          managedSessionHandles.set(sessionId, handle)
+          return handle.agent
         }
 
         try {
@@ -1636,7 +1642,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           throw new Error(`failed to ensure project directory "${cwd}": ${String(error)}`, { cause: error })
         }
         const composition = await composeAgent(presetId)
-        return (await ctx.agents.create({
+        const handle = await ctx.agents.create({
           sessionId,
           agentOptions: agentOptions(),
           meta: {
@@ -1644,7 +1650,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             ...composition.agentPreset === undefined ? {} : { agentPreset: composition.agentPreset },
           },
           setup: composition.setup,
-        })).agent
+        })
+        managedSessionHandles.set(sessionId, handle)
+        return handle.agent
       })().catch((error: unknown) => {
         // Another Host entry path may have published the same identity while
         // this operation crossed an asynchronous persistence/filesystem step.
@@ -2360,7 +2368,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         // plane, composing nothing would leave the child with no tools at all.
         const forkComposition = await composeAgent(resolveSessionPreset(source))
         try {
-          await ctx.agents.create({
+          const handle = await ctx.agents.create({
             sessionId: childId,
             seed: events.slice(0, cut),
             meta: {
@@ -2374,6 +2382,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             agentOptions: agentOptions(),
             setup: forkComposition.setup,
           })
+          managedSessionHandles.set(childId, handle)
         } catch (error: unknown) {
           return err(request, {
             code: 'internal',
@@ -2857,6 +2866,84 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           })
         }
         return ok(request, { archivedSessionIds: [...ctx.workspaceRegistry.archivedSessionIds] })
+      },
+
+      async deleteSession(request) {
+        const { sessionId } = request.payload
+
+        // Do not race a create/resume of the same identity. A failed creation
+        // is irrelevant here: deletion still gets an opportunity to inspect
+        // persistence and report the stable business result.
+        const pendingCreation = sessionCreations.get(sessionId)
+        if (pendingCreation !== undefined) {
+          try { await pendingCreation } catch { /* deletion handles the resulting state below */ }
+        }
+
+        const live = ctx.agents.get(sessionId)
+        let disposedLiveSession = false
+        if (live !== undefined) {
+          if (hasSubagentOwner(live.session, live)) {
+            return err(request, {
+              code: 'agent-busy',
+              message: `cannot delete session "${sessionId}" while it is owned by a subagent`,
+              details: { reason: 'subagent-owned session' },
+            })
+          }
+          const handle = managedSessionHandles.get(sessionId)
+          if (handle === undefined || handle.agent !== live) {
+            return err(request, {
+              code: 'agent-busy',
+              message: `cannot delete live session "${sessionId}" because this Host does not own its teardown handle`,
+              details: { reason: 'live session teardown is owned by another host component' },
+            })
+          }
+          try {
+            await handle.dispose()
+            disposedLiveSession = true
+            managedSessionHandles.delete(sessionId)
+          } catch (error: unknown) {
+            return err(request, {
+              code: 'internal',
+              message: `failed to stop session "${sessionId}" before deletion: ${String(error)}`,
+              details: {},
+            })
+          }
+        } else {
+          managedSessionHandles.delete(sessionId)
+          // A Session attached without an Agent is owned by a different
+          // composition/fiber; deleting its backing log underneath it would
+          // violate SessionPersistence's live-session fence.
+          if (ctx.sessions.get(sessionId) !== undefined) {
+            return err(request, {
+              code: 'agent-busy',
+              message: `cannot delete live session "${sessionId}" because its owner is outside this Host`,
+              details: { reason: 'live session is owned outside the API host' },
+            })
+          }
+        }
+
+        try {
+          await ctx.workspaceRegistry.deleteSession(sessionId)
+        } catch (error: unknown) {
+          if (error instanceof WorkspaceUnknownSessionError) {
+            return err(request, {
+              code: 'session-not-found',
+              message: error.message,
+              details: { sessionId },
+            })
+          }
+          throw error
+        }
+
+        // A disposed live session already emitted `session/disposed`, which
+        // projects host/session-removed through every connected Host stream.
+        // Cold sessions have no such event, so remove them explicitly.
+        if (!disposedLiveSession) {
+          for (const queue of hostQueues) {
+            queue.push(frame({ type: 'host/session-removed', sessionId }))
+          }
+        }
+        return ok(request, { deleted: true as const })
       },
     },
 
@@ -3470,6 +3557,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
 
       host(_request, signal) {
         const queue = new FrameQueue<RpcRequest<HostFrame>>()
+        hostQueues.add(queue)
         const committedWorkspaces = ctx.workspaceRegistry.list()
         const committedWorkspaceIds = new Set(
           committedWorkspaces.map(workspace => String(workspace.id)),
@@ -3569,7 +3657,10 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             }),
           )),
         ]
-        return queue.iterate(signal, () => { for (const dispose of disposers) dispose() })
+        return queue.iterate(signal, () => {
+          hostQueues.delete(queue)
+          for (const dispose of disposers) dispose()
+        })
       },
     },
 

@@ -193,6 +193,15 @@ export interface PersistenceBackend<TornMarker = unknown> {
   commitRepair(meta: SessionHeader, tornMarker: TornMarker | undefined, closers: readonly SessionEvent[]): Promise<void>
 
   /**
+   * Permanently remove one materialized session from backend storage.
+   * Optional so third-party backends remain compatible until they explicitly
+   * opt into the destructive SessionPersistence.delete() capability.
+   * @param id - persisted session identity to remove.
+   * @returns whether a stored artifact/row existed and was removed.
+   */
+  deleteStored?(id: SessionId): Promise<boolean>
+
+  /**
    * List all stored (materialized) sessions' metadata.
    * @param signal - optional cancellation for backend listing work.
    */
@@ -655,6 +664,34 @@ export class PersistenceCoordinator<TornMarker = unknown> {
     }
     // Pure lazy: record intent only. No artifact until the first append.
     this.states.set(meta.id, { meta, cursor: 0, materialized: false })
+  }
+
+  /** Permanently remove one non-live session from this persistence backend. */
+  async delete(id: SessionId): Promise<boolean> {
+    await this.waitForRetirement(id)
+    if (this.ctx.sessions.get(id) !== undefined) {
+      throw new Error(`cannot delete session "${id}" while it is live`)
+    }
+    return this.serialize(id, async () => {
+      if (this.ctx.sessions.get(id) !== undefined) {
+        throw new Error(`cannot delete session "${id}" while it is live`)
+      }
+      if (!this.preparations.invalidateReadyForDelete(id)) {
+        throw new Error(`cannot delete session "${id}" while a persisted preparation is active`)
+      }
+      const state = this.states.get(id)
+      if (state?.owner !== undefined) {
+        throw new Error(`cannot delete session "${id}" while it is owned by a live session`)
+      }
+      const remove = this.backend.deleteStored
+      if (remove === undefined) {
+        throw new Error(`${this.backend.name}: session deletion is not supported`)
+      }
+      const removed = await remove.call(this.backend, id)
+      this.states.delete(id)
+      this.preparations.invalidate(id)
+      return removed || state !== undefined
+    })
   }
 
   // `async` so synchronous materialization failures below reject (not throw) per

@@ -106,4 +106,14 @@ export interface WorkspaceApi {
    */
   archiveSession(request: RpcRequest<{ sessionId: SessionId }>):
   Promise<RpcResponse<{ archivedSessionIds: SessionId[] }>>
+
+  /**
+   * Permanently removes one session from DSH persistence and Workspace
+   * accounting. The Workspace directory and its user files are not touched.
+   * A live top-level Agent is stopped before deletion. An unknown session
+   * fails with `session-not-found`; a live session whose teardown capability
+   * is owned elsewhere fails with `agent-busy`.
+   */
+  deleteSession(request: RpcRequest<{ sessionId: SessionId }>):
+  Promise<RpcResponse<{ deleted: true }>>
 }

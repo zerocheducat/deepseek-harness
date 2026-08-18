@@ -45,9 +45,10 @@ export function WorkspaceId(id: string): WorkspaceId {
 export class WorkspaceUnknownSessionError extends Error {
   /**
    * @param sessionId - The unknown session id.
+   * @param operation - Session operation being attempted.
    */
-  constructor(readonly sessionId: SessionId) {
-    super(`cannot archive session '${sessionId}': live sessions and session persistence hold no such session`)
+  constructor(readonly sessionId: SessionId, operation: 'archive' | 'delete' = 'archive') {
+    super(`cannot ${operation} session '${sessionId}': live sessions and session persistence hold no such session`)
     this.name = 'WorkspaceUnknownSessionError'
   }
 }
@@ -251,6 +252,37 @@ export class WorkspaceRegistry extends Service {
       }
       const state = this.requireState()
       await this.setState({ ...state, archivedSessionIds: [...state.archivedSessionIds, sessionId] })
+    })
+  }
+
+  /**
+   * Permanently delete one session log and remove every Workspace/archive
+   * reference to it. The workspace directory and user files are never touched.
+   * Callers must stop any live Agent before entering this operation.
+   * @param sessionId - session identity to delete.
+   */
+  deleteSession(sessionId: SessionId): Promise<void> {
+    return this.enqueueOperation(async () => {
+      if (!(await this.sessionKnown(sessionId))) {
+        throw new WorkspaceUnknownSessionError(sessionId, 'delete')
+      }
+
+      const removed = await this.ctx.sessionPersistence.delete(sessionId)
+      if (!removed) throw new WorkspaceUnknownSessionError(sessionId, 'delete')
+
+      for (const entity of this.entities.values()) await entity.detachSession(sessionId)
+
+      const state = this.requireState()
+      if (state.archivedSessionIds.includes(sessionId)) {
+        await this.setState({
+          ...state,
+          archivedSessionIds: state.archivedSessionIds.filter(id => id !== sessionId),
+        })
+      }
+
+      this.headers.delete(sessionId)
+      this.sessionPaths.delete(sessionId)
+      this.invalidSessionPaths.delete(sessionId)
     })
   }
 

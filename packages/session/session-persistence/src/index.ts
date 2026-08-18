@@ -221,6 +221,18 @@ export abstract class SessionPersistence extends Service {
   Promise<{ meta: SessionHeader; events: SessionEvent[] }>
 
   /**
+   * Permanently delete one persisted session log. First-party backends override
+   * this method; the default keeps third-party persistence implementations
+   * source-compatible while refusing destructive behavior they did not opt into.
+   * A live session must be stopped before deletion.
+   * @param _id - persisted session identity to delete.
+   * @returns whether a materialized persisted session was removed.
+   */
+  delete(_id: SessionId): Promise<boolean> {
+    return Promise.reject(new Error('this session persistence backend does not support session deletion'))
+  }
+
+  /**
    * Lightweight listing from metadata, without a full-log parse.
    * @param signal - optional cancellation for backend listing work.
    * @returns one header per materialized session.

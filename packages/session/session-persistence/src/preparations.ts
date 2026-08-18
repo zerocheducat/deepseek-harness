@@ -191,6 +191,21 @@ export class SessionPreparations<Source extends PreparedSource, CommitState> {
   }
 
   /**
+   * Discard a cache-only ready preparation before destructive deletion.
+   * Loading, committing, or reserved entries represent an active resume/read
+   * transaction and must not be invalidated underneath their owner.
+   * @param id - session identity about to be deleted.
+   * @returns true when no active preparation blocks deletion.
+   */
+  invalidateReadyForDelete(id: SessionId): boolean {
+    const entry = this.entries.get(id)
+    if (entry === undefined) return true
+    if (entry.phase !== 'ready') return false
+    this.remove(entry)
+    return true
+  }
+
+  /**
    * Discard an exact stale ready source without disturbing an exclusive owner.
    * @param id - changed session identity.
    * @param expected - exact source observed before its revision check.

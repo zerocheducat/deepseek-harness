@@ -1069,6 +1069,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the header and the stored events with `seq >= fromSeq`.',
       },
       {
+        signature: 'delete(_id: SessionId): Promise<boolean>',
+        description: 'Permanently delete one persisted session log. First-party backends implement this destructive capability; unsupported backends reject. A live session must be stopped before deletion.',
+        parameters: [{ name: '_id', description: 'persisted session identity to delete.' }],
+        returns: 'whether a materialized persisted session was removed.',
+      },
+      {
         signature: 'abstract list(signal?: AbortSignal): Promise<SessionHeader[]>',
         description: 'Lightweight listing from metadata, without a full-log parse.',
         parameters: [{ name: 'signal', description: 'optional cancellation for backend listing work.' }],
@@ -2150,6 +2156,11 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Archive one session durably. The session must exist (live or in session persistence); its workspace accounting — or lack of one — is irrelevant. An already archived id resolves without writing.',
         parameters: [{ name: 'sessionId', description: 'The session to archive.' }],
         returns: 'resolution after durability.',
+      },
+      {
+        signature: 'deleteSession(sessionId: SessionId): Promise<void>',
+        description: 'Permanently delete one session log and remove every Workspace/archive reference to it. The workspace directory and user files are never touched. Callers must stop any live Agent before entering this operation.',
+        parameters: [{ name: 'sessionId', description: 'session identity to delete.' }],
       },
       {
         signature: 'async resolveByPath(path: string): Promise<Workspace | undefined>',

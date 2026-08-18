@@ -91,4 +91,11 @@ export interface IWorkspaces {
    * @param sessionId - session to archive.
    */
   archiveSession(sessionId: SessionId): Promise<void>
+  /**
+   * Permanently delete a session log and remove it from DSH. Workspace files
+   * are preserved. Deleting the current session clears it through the Host's
+   * session-removed event.
+   * @param sessionId - session to permanently delete.
+   */
+  deleteSession(sessionId: SessionId): Promise<void>
 }

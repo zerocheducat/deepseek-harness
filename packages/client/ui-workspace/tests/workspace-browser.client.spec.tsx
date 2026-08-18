@@ -76,6 +76,7 @@ function mount(overrides: Partial<WorkspaceBrowserProps> = {}) {
     renameWorkspace: vi.fn(async () => {}),
     deleteWorkspace: vi.fn(async () => {}),
     archiveSession: vi.fn(async () => {}),
+    deleteSession: vi.fn(async () => {}),
     insertWorkspaceBefore: vi.fn(async () => {}),
     insertSessionBefore: vi.fn(async () => {}),
     createWorkspace: vi.fn(async () => workspace('created', [])),
@@ -333,6 +334,25 @@ describe('WorkspaceBrowser', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: '单列表' }))
     expect(screen.getByText('kept-s')).toBeTruthy()
     expect(screen.queryByText('gone-s')).toBeNull()
+  })
+
+  it('confirms permanent session deletion without claiming Workspace files are removed', async () => {
+    const deleteSession = vi.fn(async () => {})
+    mount({
+      useSessions: hook(sessionState([summary('delete-me', 1)])),
+      useWorkspaces: hook(workspaceState([workspace('alpha', ['delete-me'])])),
+      deleteSession,
+    })
+    fireEvent.click(screen.getByText('alpha'))
+    fireEvent.click(screen.getByRole('button', { name: '会话“delete-me”的操作' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '删除会话' }))
+    const dialog = screen.getByRole('dialog', { name: '删除会话' })
+    expect(dialog.textContent).toContain('永久删除会话“delete-me”的会话记录')
+    expect(dialog.textContent).toContain('工作区文件不会被删除')
+    expect(deleteSession).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: '删除会话' }))
+    await waitFor(() => { expect(deleteSession).toHaveBeenCalledWith(sid('delete-me')) })
+    await waitFor(() => { expect(screen.queryByRole('dialog', { name: '删除会话' })).toBeNull() })
   })
 
   it('logs and keeps the tree when the archive call rejects', async () => {
