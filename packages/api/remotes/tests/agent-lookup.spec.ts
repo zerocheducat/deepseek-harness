@@ -111,6 +111,31 @@ describe('API Remote Agent resolver races', () => {
     }
   })
 
+  it('reports the owned handle for a cold resume before exposing the Agent', async () => {
+    const ctx = await createContext()
+    const sessionId = sid('owned-handle-cold-resume')
+    const meta = header(sessionId)
+    let published: Session | undefined
+    provideSession(ctx, meta, () => {
+      published = ctx.sessions.create(sessionId, { meta: { cwd: '/proj' } })
+      return Promise.resolve({ meta, events: [] })
+    })
+    const dispose = vi.fn(() => Promise.resolve())
+    const onResumeHandle = vi.fn()
+    const resume = vi.spyOn(ctx.agents, 'resume').mockImplementation(async () => {
+      if (published === undefined) throw new Error('Session was not published')
+      return { agent: stubAgent(ctx, published), dispose }
+    })
+
+    const result = await createApiRemoteAgentResolver(ctx, { onResumeHandle })(sessionId)
+
+    expect(result).toMatchObject({ agent: { id: sessionId } })
+    expect(resume).toHaveBeenCalledTimes(1)
+    expect(onResumeHandle).toHaveBeenCalledTimes(1)
+    expect(onResumeHandle.mock.calls[0]?.[0]).toMatchObject({ agent: { id: sessionId }, dispose })
+    await ctx.fiber.dispose()
+  })
+
   it('uses the shared cold-resume policy for the Agent Host Context', async () => {
     const ctx = await createContext()
     const sessionId = sid('context-cold-resume')

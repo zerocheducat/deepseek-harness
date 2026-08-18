@@ -1241,6 +1241,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     agentOptions,
     setup: async ({ meta, events }) =>
       (await composeAgent(resolveSessionPreset({ header: meta, events }))).setup,
+    onResumeHandle: (handle) => {
+      managedSessionHandles.set(handle.agent.id, handle)
+    },
   })
 
   /** Send one transient frame to every connected mux consumer. */
